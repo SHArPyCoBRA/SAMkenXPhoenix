@@ -18,6 +18,7 @@
 package org.apache.phoenix.coprocessor;
 
 import java.io.IOException;
+import java.sql.SQLException;
 import java.util.List;
 
 import org.apache.hadoop.conf.Configuration;
@@ -27,6 +28,7 @@ import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.KeepDeletedCells;
 import org.apache.hadoop.hbase.MemoryCompactionPolicy;
 import org.apache.hadoop.hbase.NotServingRegionException;
+import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.client.ColumnFamilyDescriptor;
 import org.apache.hadoop.hbase.client.Scan;
 import org.apache.hadoop.hbase.coprocessor.ObserverContext;
@@ -55,15 +57,25 @@ import org.apache.phoenix.hbase.index.covered.update.ColumnReference;
 import org.apache.phoenix.index.IndexMaintainer;
 import org.apache.phoenix.iterate.NonAggregateRegionScannerFactory;
 import org.apache.phoenix.iterate.RegionScannerFactory;
+import org.apache.phoenix.jdbc.PhoenixConnection;
 import org.apache.phoenix.query.QueryServices;
 import org.apache.phoenix.query.QueryServicesOptions;
 import org.apache.phoenix.schema.StaleRegionBoundaryCacheException;
+import org.apache.phoenix.schema.TableNotFoundException;
 import org.apache.phoenix.util.ClientUtil;
+import org.apache.phoenix.util.MetaDataUtil;
+import org.apache.phoenix.util.QueryUtil;
 import org.apache.phoenix.util.ScanUtil;
+import org.apache.phoenix.schema.PTable;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import static org.apache.phoenix.util.ScanUtil.getPageSizeMsForFilter;
 
 abstract public class BaseScannerRegionObserver implements RegionObserver {
+
+    private static final Logger LOGGER = LoggerFactory.getLogger(BaseScannerRegionObserver.class);
+
     /**
      * Used by logger to identify coprocessor
      */
@@ -96,12 +108,35 @@ abstract public class BaseScannerRegionObserver implements RegionObserver {
                     Bytes.compareTo(upperExclusiveRegionKey, expectedUpperRegionKey) != 0) || 
                     (actualStartRow != null && Bytes.compareTo(actualStartRow, lowerInclusiveRegionKey) < 0);
         } else {
-            isStaleRegionBoundaries = Bytes.compareTo(lowerInclusiveScanKey, lowerInclusiveRegionKey) < 0 ||
-                    ( Bytes.compareTo(upperExclusiveScanKey, upperExclusiveRegionKey) > 0 && upperExclusiveRegionKey.length != 0) ||
-                    (upperExclusiveRegionKey.length != 0 && upperExclusiveScanKey.length == 0);
+            if (scan.isReversed()) {
+                isStaleRegionBoundaries =
+                        Bytes.compareTo(upperExclusiveScanKey, lowerInclusiveRegionKey) < 0 ||
+                                (Bytes.compareTo(lowerInclusiveScanKey, upperExclusiveRegionKey) >
+                                        0 && upperExclusiveRegionKey.length != 0) ||
+                                (upperExclusiveRegionKey.length != 0 &&
+                                        lowerInclusiveScanKey.length == 0);
+            } else {
+                isStaleRegionBoundaries =
+                        Bytes.compareTo(lowerInclusiveScanKey, lowerInclusiveRegionKey) < 0 ||
+                                (Bytes.compareTo(upperExclusiveScanKey, upperExclusiveRegionKey) >
+                                        0 && upperExclusiveRegionKey.length != 0) ||
+                                (upperExclusiveRegionKey.length != 0 &&
+                                        upperExclusiveScanKey.length == 0);
+            }
         }
         if (isStaleRegionBoundaries) {
-            Exception cause = new StaleRegionBoundaryCacheException(region.getRegionInfo().getTable().getNameAsString());
+            LOGGER.error("Throwing StaleRegionBoundaryCacheException due to mismatched scan "
+                            + "boundaries. Region: {} , lowerInclusiveScanKey: {} , "
+                            + "upperExclusiveScanKey: {} , lowerInclusiveRegionKey: {} , "
+                            + "upperExclusiveRegionKey: {} , scan reversed: {}",
+                    region.getRegionInfo().getRegionNameAsString(),
+                    Bytes.toStringBinary(lowerInclusiveScanKey),
+                    Bytes.toStringBinary(upperExclusiveScanKey),
+                    Bytes.toStringBinary(lowerInclusiveRegionKey),
+                    Bytes.toStringBinary(upperExclusiveRegionKey),
+                    scan.isReversed());
+            Exception cause = new StaleRegionBoundaryCacheException(
+                    region.getRegionInfo().getTable().getNameAsString());
             throw new DoNotRetryIOException(cause.getMessage(), cause);
         }
         if(isLocalIndex) {
@@ -282,8 +317,14 @@ abstract public class BaseScannerRegionObserver implements RegionObserver {
             // StaleRegionBoundaryCacheException to handle it by phoenix client other wise hbase
             // client may recreate scans with wrong region boundaries.
             if(t instanceof NotServingRegionException) {
+                LOGGER.error("postScannerOpen error for region {} . "
+                                + "Thorwing it as StaleRegionBoundaryCacheException",
+                        s.getRegionInfo().getRegionNameAsString(), t);
                 Exception cause = new StaleRegionBoundaryCacheException(c.getEnvironment().getRegion().getRegionInfo().getTable().getNameAsString());
                 throw new DoNotRetryIOException(cause.getMessage(), cause);
+            } else {
+                LOGGER.error("postScannerOpen error for region {}",
+                        s.getRegionInfo().getRegionNameAsString(), t);
             }
             ClientUtil.throwIOException(c.getEnvironment().getRegion().getRegionInfo().getRegionNameAsString(), t);
             return null; // impossible
@@ -332,9 +373,10 @@ abstract public class BaseScannerRegionObserver implements RegionObserver {
             setScanOptionsForFlushesAndCompactions(options);
             return;
         }
-        if (isMaxLookbackTimeEnabled(conf)) {
+        long maxLookbackAge = getMaxLookbackAge(c);
+        if (isMaxLookbackTimeEnabled(maxLookbackAge)) {
             setScanOptionsForFlushesAndCompactionsWhenPhoenixTTLIsDisabled(conf, options, store,
-                    scanType);
+                    scanType, maxLookbackAge);
         }
     }
 
@@ -346,9 +388,10 @@ abstract public class BaseScannerRegionObserver implements RegionObserver {
             setScanOptionsForFlushesAndCompactions(options);
             return;
         }
-        if (isMaxLookbackTimeEnabled(conf)) {
+        long maxLookbackAge = getMaxLookbackAge(c);
+        if (isMaxLookbackTimeEnabled(maxLookbackAge)) {
             setScanOptionsForFlushesAndCompactionsWhenPhoenixTTLIsDisabled(conf, options, store,
-                    ScanType.COMPACT_RETAIN_DELETES);
+                    ScanType.COMPACT_RETAIN_DELETES, maxLookbackAge);
         }
     }
 
@@ -361,7 +404,8 @@ abstract public class BaseScannerRegionObserver implements RegionObserver {
             setScanOptionsForFlushesAndCompactions(options);
             return;
         }
-        if (isMaxLookbackTimeEnabled(conf)) {
+        long maxLookbackAge = getMaxLookbackAge(c);
+        if (isMaxLookbackTimeEnabled(maxLookbackAge)) {
             MemoryCompactionPolicy inMemPolicy =
                     store.getColumnFamilyDescriptor().getInMemoryCompaction();
             ScanType scanType;
@@ -374,7 +418,7 @@ abstract public class BaseScannerRegionObserver implements RegionObserver {
                 scanType = ScanType.COMPACT_RETAIN_DELETES;
             }
             setScanOptionsForFlushesAndCompactionsWhenPhoenixTTLIsDisabled(conf, options, store,
-                    scanType);
+                    scanType, maxLookbackAge);
         }
     }
 
@@ -452,10 +496,9 @@ abstract public class BaseScannerRegionObserver implements RegionObserver {
      */
     public long getTimeToLiveForCompactions(Configuration conf,
             ColumnFamilyDescriptor columnDescriptor,
-            ScanOptions options) {
+            ScanOptions options, long maxLookbackTtl) {
         long ttlConfigured = columnDescriptor.getTimeToLive();
         long ttlInMillis = ttlConfigured * 1000;
-        long maxLookbackTtl = BaseScannerRegionObserverConstants.getMaxLookbackInMillis(conf);
         if (isMaxLookbackTimeEnabled(maxLookbackTtl)) {
             if (ttlConfigured == HConstants.FOREVER
                     && columnDescriptor.getKeepDeletedCells() != KeepDeletedCells.TRUE) {
@@ -475,10 +518,10 @@ abstract public class BaseScannerRegionObserver implements RegionObserver {
     public void setScanOptionsForFlushesAndCompactionsWhenPhoenixTTLIsDisabled(Configuration conf,
             ScanOptions options,
             final Store store,
-            ScanType type) {
+            ScanType type, long maxLookbackAge) {
         ColumnFamilyDescriptor cfDescriptor = store.getColumnFamilyDescriptor();
         options.setTTL(getTimeToLiveForCompactions(conf, cfDescriptor,
-                options));
+                options, maxLookbackAge));
         options.setKeepDeletedCells(getKeepDeletedCells(options, type));
         options.setMaxVersions(Integer.MAX_VALUE);
         options.setMinVersions(getMinVersions(options, cfDescriptor));
@@ -491,6 +534,27 @@ abstract public class BaseScannerRegionObserver implements RegionObserver {
 
     public static boolean isMaxLookbackTimeEnabled(long maxLookbackTime){
         return maxLookbackTime > 0L;
+    }
+
+    private static long getMaxLookbackAge(ObserverContext<RegionCoprocessorEnvironment> c) {
+        TableName tableName = c.getEnvironment().getRegion().getRegionInfo().getTable();
+        String fullTableName = tableName.getNameAsString();
+        Configuration conf = c.getEnvironment().getConfiguration();
+        PTable table;
+        try(PhoenixConnection conn = QueryUtil.getConnectionOnServer(
+                conf).unwrap(PhoenixConnection.class)) {
+            table = conn.getTableNoCache(fullTableName);
+        }
+        catch (SQLException e) {
+            if (e instanceof TableNotFoundException) {
+                LOGGER.debug("Ignoring HBase table that is not a Phoenix table: {}", fullTableName);
+                // non-Phoenix HBase tables won't be found, do nothing
+            } else {
+                LOGGER.error("Unable to fetch table level max lookback age for {}", fullTableName, e);
+            }
+            return MetaDataUtil.getMaxLookbackAge(conf, null);
+        }
+        return MetaDataUtil.getMaxLookbackAge(conf, table.getMaxLookbackAge());
     }
 
     public static boolean isPhoenixTableTTLEnabled(Configuration conf) {

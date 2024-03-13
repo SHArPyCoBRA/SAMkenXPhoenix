@@ -72,10 +72,10 @@ import org.apache.phoenix.schema.types.PVarbinary;
 import org.apache.phoenix.schema.types.PVarchar;
 import org.apache.phoenix.util.ByteUtil;
 import org.apache.phoenix.util.PhoenixKeyValueUtil;
-import org.apache.phoenix.util.PhoenixRuntime;
 import org.apache.phoenix.util.QueryUtil;
 import org.apache.phoenix.util.SchemaUtil;
 import org.apache.phoenix.util.StringUtil;
+import org.apache.phoenix.coprocessorclient.BaseScannerRegionObserverConstants;
 
 import org.apache.phoenix.thirdparty.com.google.common.collect.Lists;
 
@@ -433,6 +433,8 @@ public class PhoenixDatabaseMetaData implements DatabaseMetaData {
 
     public static final String SYSTEM_TRANSFORM_TABLE = "TRANSFORM";
     public static final String SYSTEM_TRANSFORM_NAME = SchemaUtil.getTableName(SYSTEM_CATALOG_SCHEMA, SYSTEM_TRANSFORM_TABLE);
+    public static final String MAX_LOOKBACK_AGE = BaseScannerRegionObserverConstants.MAX_LOOKBACK_AGE;
+    public static final byte[] MAX_LOOKBACK_AGE_BYTES = Bytes.toBytes(MAX_LOOKBACK_AGE);
 
     //SYSTEM:LOG
     public static final String SYSTEM_LOG_TABLE = "LOG";
@@ -787,7 +789,7 @@ public class PhoenixDatabaseMetaData implements DatabaseMetaData {
                 String tableName = rs.getString(TABLE_NAME);
                 String tenantId = rs.getString(TABLE_CAT);
                 String fullTableName = SchemaUtil.getTableName(schemaName, tableName);
-                PTable table = PhoenixRuntime.getTableNoCache(connection, fullTableName);
+                PTable table = connection.getTableNoCache(fullTableName);
                 boolean isSalted = table.getBucketNum()!=null;
                 boolean tenantColSkipped = false;
                 List<PColumn> columns = table.getColumns();
@@ -1183,7 +1185,7 @@ public class PhoenixDatabaseMetaData implements DatabaseMetaData {
             return getEmptyResultSet();
         }
         String fullTableName = SchemaUtil.getTableName(schemaName, tableName);
-        PTable table = PhoenixRuntime.getTableNoCache(connection, fullTableName);
+        PTable table = connection.getTableNoCache(fullTableName);
         boolean isSalted = table.getBucketNum() != null;
         boolean tenantColSkipped = false;
         List<PColumn> pkColumns = table.getPKColumns();

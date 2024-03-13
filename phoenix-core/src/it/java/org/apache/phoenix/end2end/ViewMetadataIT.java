@@ -27,6 +27,8 @@ import static org.apache.phoenix.exception.SQLExceptionCode
 import static org.apache.phoenix.exception.SQLExceptionCode.CANNOT_MUTATE_TABLE;
 import static org.apache.phoenix.exception.SQLExceptionCode
         .NOT_NULLABLE_COLUMN_IN_ROW_KEY;
+import static org.apache.phoenix.exception.SQLExceptionCode.VIEW_WITH_PROPERTIES;
+import static org.apache.phoenix.exception.SQLExceptionCode.MAX_LOOKBACK_AGE_SUPPORTED_FOR_TABLES_ONLY;
 import static org.apache.phoenix.jdbc.PhoenixDatabaseMetaData.LINK_TYPE;
 import static org.apache.phoenix.jdbc.PhoenixDatabaseMetaData
         .SYSTEM_LINK_HBASE_TABLE_NAME;
@@ -49,6 +51,8 @@ import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
+import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertThrows;
 
 import java.sql.Connection;
 import java.sql.DriverManager;
@@ -329,7 +333,7 @@ public class ViewMetadataIT extends SplitSystemCatalogIT {
 
     @Test
     public void testRecreateDroppedTableWithChildViews() throws Exception {
-        Connection conn = DriverManager.getConnection(getUrl());
+        PhoenixConnection conn = (PhoenixConnection) DriverManager.getConnection(getUrl());
         String fullTableName = SchemaUtil.getTableName(SCHEMA1,
                 generateUniqueName());
         String fullViewName1 = SchemaUtil.getTableName(SCHEMA2,
@@ -363,12 +367,12 @@ public class ViewMetadataIT extends SplitSystemCatalogIT {
         conn.createStatement().execute(tableDdl);
         // the two child views should still not exist
         try {
-            PhoenixRuntime.getTableNoCache(conn, fullViewName1);
+            conn.getTableNoCache(fullViewName1);
             fail();
         } catch (SQLException ignored) {
         }
         try {
-            PhoenixRuntime.getTableNoCache(conn, fullViewName2);
+            conn.getTableNoCache(fullViewName2);
             fail();
         } catch (SQLException ignored) {
         }
@@ -731,7 +735,7 @@ public class ViewMetadataIT extends SplitSystemCatalogIT {
 
     @Test
     public void testRecreateIndexWhoseAncestorWasDropped() throws Exception {
-        Connection conn = DriverManager.getConnection(getUrl());
+        PhoenixConnection conn = (PhoenixConnection) DriverManager.getConnection(getUrl());
         String fullTableName1 = SchemaUtil.getTableName(SCHEMA1,
                 generateUniqueName());
         String fullViewName1 = SchemaUtil.getTableName(SCHEMA2,
@@ -772,14 +776,14 @@ public class ViewMetadataIT extends SplitSystemCatalogIT {
         conn.createStatement().execute(ddl);
 
         String fullIndexName = SchemaUtil.getTableName(SCHEMA2, indexName);
-        PTable index = PhoenixRuntime.getTableNoCache(conn, fullIndexName);
+        PTable index = conn.getTableNoCache(fullIndexName);
         // the index should have v3 but not v2
         validateCols(index);
     }
 
     @Test
     public void testRecreateViewWhoseParentWasDropped() throws Exception {
-        Connection conn = DriverManager.getConnection(getUrl());
+        PhoenixConnection conn = (PhoenixConnection) DriverManager.getConnection(getUrl());
         String fullTableName1 = SchemaUtil.getTableName(SCHEMA1,
                 generateUniqueName());
         String fullViewName1 = SchemaUtil.getTableName(SCHEMA2,
@@ -809,7 +813,7 @@ public class ViewMetadataIT extends SplitSystemCatalogIT {
                 + " WHERE k > 5";
         conn.createStatement().execute(ddl);
 
-        PTable view = PhoenixRuntime.getTableNoCache(conn, fullViewName1);
+        PTable view = conn.getTableNoCache(fullViewName1);
         // the view should have v3 but not v2
         validateCols(view);
     }
@@ -1037,7 +1041,7 @@ public class ViewMetadataIT extends SplitSystemCatalogIT {
                 generateUniqueName());
         String fullViewName = SchemaUtil.getTableName(SCHEMA2,
                 generateUniqueName());
-        try (Connection conn = DriverManager.getConnection(getUrl())) {
+        try (PhoenixConnection conn = (PhoenixConnection) DriverManager.getConnection(getUrl())) {
             conn.createStatement()
                     .execute("create table " + fullTableName
                             + "(tenantId CHAR(15) NOT NULL, pk1 integer "
@@ -1051,8 +1055,8 @@ public class ViewMetadataIT extends SplitSystemCatalogIT {
                             + " set IMMUTABLE_ROWS = true");
 
             // fetch the latest tables
-            PTable table = PhoenixRuntime.getTableNoCache(conn, fullTableName);
-            PTable view = PhoenixRuntime.getTableNoCache(conn, fullViewName);
+            PTable table = conn.getTableNoCache(fullTableName);
+            PTable view = conn.getTableNoCache(fullViewName);
             assertTrue("IMMUTABLE_ROWS property set incorrectly",
                     table.isImmutableRows());
             assertTrue("IMMUTABLE_ROWS property set incorrectly",
@@ -1346,7 +1350,7 @@ public class ViewMetadataIT extends SplitSystemCatalogIT {
 
     @Test
     public void testCreateViewDefinesPKConstraint() throws Exception {
-        Connection conn = DriverManager.getConnection(getUrl());
+        PhoenixConnection conn = (PhoenixConnection) DriverManager.getConnection(getUrl());
         String fullTableName = SchemaUtil.getTableName(SCHEMA1,
                 generateUniqueName());
         String fullViewName = SchemaUtil.getTableName(SCHEMA2,
@@ -1361,7 +1365,7 @@ public class ViewMetadataIT extends SplitSystemCatalogIT {
                 + " AS SELECT * FROM " + fullTableName + " WHERE K1 = 1";
         conn.createStatement().execute(ddl);
 
-        PhoenixRuntime.getTableNoCache(conn, fullViewName);
+        conn.getTableNoCache(fullViewName);
 
         // assert PK metadata
         ResultSet rs =
@@ -1369,6 +1373,36 @@ public class ViewMetadataIT extends SplitSystemCatalogIT {
                     SchemaUtil.getSchemaNameFromFullName(fullViewName),
                     SchemaUtil.getTableNameFromFullName(fullViewName));
         assertPKs(rs, new String[] {"K1", "K2", "K3", "K4"});
+    }
+
+    @Test
+    public void testAlterViewAndViewIndexMaxLookbackAgeFails() throws Exception {
+        String schemaName = generateUniqueName();
+        String dataTableName = generateUniqueName();
+        String fullDataTableName = SchemaUtil.getTableName(schemaName, dataTableName);
+        try(Connection conn = DriverManager.getConnection(getUrl());
+            Statement stmt = conn.createStatement()) {
+            String ddl = "CREATE TABLE " + fullDataTableName + " (ID VARCHAR NOT NULL PRIMARY KEY, COL1 INTEGER)";
+            stmt.execute(ddl);
+            assertNull(queryTableLevelMaxLookbackAge(fullDataTableName));
+            String viewName = generateUniqueName();
+            String fullViewName = SchemaUtil.getTableName(schemaName, viewName);
+            ddl = "CREATE VIEW " + fullViewName + " AS SELECT * FROM " + fullDataTableName;
+            stmt.execute(ddl);
+            assertNull(queryTableLevelMaxLookbackAge(fullViewName));
+            String alterViewDdl = "ALTER VIEW " + fullViewName + " SET MAX_LOOKBACK_AGE = 300";
+            SQLException err = assertThrows(SQLException.class, () -> stmt.execute(alterViewDdl));
+            assertEquals(VIEW_WITH_PROPERTIES.getErrorCode(), err.getErrorCode());
+            String viewIndexName = generateUniqueName();
+            String fullViewIndexName = SchemaUtil.getTableName(schemaName, viewIndexName);
+            ddl = "CREATE INDEX " + viewIndexName + " ON " + fullViewName + " (COL1)";
+            stmt.execute(ddl);
+            assertNull(queryTableLevelMaxLookbackAge(fullViewIndexName));
+            String alterViewIndexDdl = "ALTER INDEX " + viewIndexName + " ON " + fullViewName +
+                    " ACTIVE SET MAX_LOOKBACK_AGE = 300";
+            err = assertThrows(SQLException.class, () -> stmt.execute(alterViewIndexDdl));
+            assertEquals(MAX_LOOKBACK_AGE_SUPPORTED_FOR_TABLES_ONLY.getErrorCode(), err.getErrorCode());
+        }
     }
 
     private void assertPKs(ResultSet rs, String[] expectedPKs)

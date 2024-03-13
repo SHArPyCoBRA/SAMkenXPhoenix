@@ -98,6 +98,7 @@ public enum SQLExceptionCode {
     AMBIGUOUS_JOIN_CONDITION(217, "22017", "Ambiguous or non-equi join condition specified. Consider using table list with where clause."),
     CONSTRAINT_VIOLATION(218, "23018", "Constraint violation."),
     SUBQUERY_SELECT_LIST_COLUMN_MUST_HAS_ALIAS(219,"23019","Every column in subquery select lists must has alias when used for join."),
+    ROW_KEY_OUT_OF_SCAN_RANGE(220, "23020", "Row key is out of scan start/stop key boundaries"),
 
     CONCURRENT_TABLE_MUTATION(301, "23000", "Concurrent modification to table.", new Factory() {
         @Override
@@ -358,6 +359,7 @@ public enum SQLExceptionCode {
             + "only if none of the child views extends primary key"),
     VIEW_CANNOT_EXTEND_PK_WITH_PARENT_INDEXES(10956, "44A38", "View can extend parent primary key"
             + " only if none of the parents have indexes in the parent hierarchy"),
+    MAX_LOOKBACK_AGE_SUPPORTED_FOR_TABLES_ONLY(10957, "44A39", "Max lookback age can only be set for tables"),
 
     /** Sequence related */
     SEQUENCE_ALREADY_EXIST(1200, "42Z00", "Sequence already exists.", new Factory() {

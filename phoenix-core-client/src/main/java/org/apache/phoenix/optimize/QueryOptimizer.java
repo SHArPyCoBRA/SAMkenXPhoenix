@@ -77,7 +77,6 @@ import org.apache.phoenix.util.ParseNodeUtil;
 import org.apache.phoenix.util.ParseNodeUtil.RewriteResult;
 
 import org.apache.phoenix.thirdparty.com.google.common.collect.Lists;
-import org.apache.phoenix.util.PhoenixRuntime;
 import org.apache.phoenix.util.SchemaUtil;
 
 public class QueryOptimizer {
@@ -211,8 +210,9 @@ public class QueryOptimizer {
 
     private List<QueryPlan> getApplicablePlansForSingleFlatQuery(QueryPlan dataPlan, PhoenixStatement statement, List<? extends PDatum> targetColumns, ParallelIteratorFactory parallelIteratorFactory, boolean stopAtBestPlan) throws SQLException {
         SelectStatement select = (SelectStatement)dataPlan.getStatement();
-        // Exit early if we have a point lookup as we can't get better than that
-        if (dataPlan.getContext().getScanRanges().isPointLookup()
+        String indexHint = select.getHint().getHint(Hint.INDEX);
+        // Exit early if we have a point lookup w/o index hint as we can't get better than that
+        if (indexHint == null && dataPlan.getContext().getScanRanges().isPointLookup()
                 && stopAtBestPlan && dataPlan.isApplicable()) {
             return Collections.<QueryPlan> singletonList(dataPlan);
         }
@@ -391,15 +391,15 @@ public class QueryOptimizer {
                         int lastIndexOf = indexTable.getName().getString().lastIndexOf(
                                 QueryConstants.CHILD_VIEW_INDEX_NAME_SEPARATOR);
                         String indexName = indexTable.getName().getString().substring(lastIndexOf + 1);
-                        PTable newIndexTable = PhoenixRuntime.getTable(connection, indexName);
-                        dataTable = PhoenixRuntime.getTable(connection, SchemaUtil.getTableName(
+                        PTable newIndexTable = connection.getTable(indexName);
+                        dataTable = connection.getTable(SchemaUtil.getTableName(
                                 newIndexTable.getParentSchemaName().getString(),
                                 indexTable.getParentTableName().getString()));
                         maintainer = newIndexTable.getIndexMaintainer(dataTable,
                                 statement.getConnection());
                     } else {
-                        dataTable = PhoenixRuntime.getTable(connection,
-                                SchemaUtil.getTableName(indexTable.getParentSchemaName().getString(),
+                        dataTable = connection.getTable(SchemaUtil
+                                .getTableName(indexTable.getParentSchemaName().getString(),
                                         indexTable.getParentTableName().getString()));
                         maintainer = indexTable.getIndexMaintainer(dataTable, connection);
                     }

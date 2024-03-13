@@ -99,6 +99,7 @@ import static org.apache.phoenix.jdbc.PhoenixDatabaseMetaData.VIEW_CONSTANT;
 import static org.apache.phoenix.jdbc.PhoenixDatabaseMetaData.VIEW_INDEX_ID_DATA_TYPE;
 import static org.apache.phoenix.jdbc.PhoenixDatabaseMetaData.VIEW_STATEMENT;
 import static org.apache.phoenix.jdbc.PhoenixDatabaseMetaData.VIEW_TYPE;
+import static org.apache.phoenix.jdbc.PhoenixDatabaseMetaData.MAX_LOOKBACK_AGE;
 import static org.apache.phoenix.query.QueryConstants.SYSTEM_SCHEMA_NAME;
 import static org.apache.phoenix.query.QueryServices.DEFAULT_DISABLE_VIEW_SUBTREE_VALIDATION;
 import static org.apache.phoenix.query.QueryServices.DISABLE_VIEW_SUBTREE_VALIDATION;
@@ -155,6 +156,7 @@ import java.util.Map.Entry;
 import java.util.Properties;
 import java.util.Set;
 import java.util.HashSet;
+import java.util.Objects;
 
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.client.Table;
@@ -353,9 +355,10 @@ public class MetaDataClient {
                     PHYSICAL_TABLE_NAME + "," +
                     SCHEMA_VERSION + "," +
                     STREAMING_TOPIC_NAME + "," +
-                    INDEX_WHERE +
+                    INDEX_WHERE + "," +
+                    MAX_LOOKBACK_AGE +
                     ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, " +
-                "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+                "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
 
     private static final String CREATE_SCHEMA = "UPSERT INTO " + SYSTEM_CATALOG_SCHEMA + ".\"" + SYSTEM_CATALOG_TABLE
             + "\"( " + TABLE_SCHEM + "," + TABLE_NAME + ") VALUES (?,?)";
@@ -2111,6 +2114,16 @@ public class MetaDataClient {
 
             String schemaVersion = (String) TableProperty.SCHEMA_VERSION.getValue(tableProps);
             String streamingTopicName = (String) TableProperty.STREAMING_TOPIC_NAME.getValue(tableProps);
+            Long maxLookbackAge = (Long) TableProperty.MAX_LOOKBACK_AGE.getValue(tableProps);
+
+            if (maxLookbackAge != null && tableType != TABLE) {
+                throw new SQLExceptionInfo.Builder(SQLExceptionCode.
+                        MAX_LOOKBACK_AGE_SUPPORTED_FOR_TABLES_ONLY)
+                        .setSchemaName(schemaName)
+                        .setTableName(tableName)
+                        .build()
+                        .buildException();
+            }
 
             if (parent != null && tableType == PTableType.INDEX) {
                 timestamp = TransactionUtil.getTableTimestamp(connection, transactionProvider != null, transactionProvider);
@@ -2540,7 +2553,7 @@ public class MetaDataClient {
                      * the same HTable. Views always use the base table's column qualifier counter for doling out
                      * encoded column qualifier.
                      */
-                    viewPhysicalTable = PhoenixRuntime.getTable(connection, physicalNames.get(0).getString());
+                    viewPhysicalTable = connection.getTable(physicalNames.get(0).getString());
                     immutableStorageScheme = viewPhysicalTable.getImmutableStorageScheme();
                     encodingScheme = viewPhysicalTable.getEncodingScheme();
 					if (EncodedColumnsUtil.usesEncodedColumnNames(viewPhysicalTable)) {
@@ -3153,6 +3166,12 @@ public class MetaDataClient {
             } else {
                 tableUpsert.setNull(36, Types.VARCHAR);
             }
+            if (maxLookbackAge == null) {
+                tableUpsert.setNull(37, Types.BIGINT);
+            }
+            else {
+                tableUpsert.setLong(37, maxLookbackAge);
+            }
             tableUpsert.execute();
 
             if (asyncCreatedDate != null) {
@@ -3302,6 +3321,7 @@ public class MetaDataClient {
                         .setStreamingTopicName(streamingTopicName)
                         .setIndexWhere(statement.getWhereClause() == null ? null
                                 : statement.getWhereClause().toString())
+                        .setMaxLookbackAge(maxLookbackAge)
                         .build();
                 result = new MetaDataMutationResult(code, result.getMutationTime(), table, true);
                 addTableToCache(result);
@@ -3552,7 +3572,7 @@ public class MetaDataClient {
         // Checking the parent table whether exists
         String fullTableName = SchemaUtil.getTableName(schemaName, tableName);
         try {
-            PTable ptable = connection.getTable(new PTableKey(connection.getTenantId(), fullTableName));
+            PTable ptable = connection.getTable(fullTableName);
             if (parentTableName != null &&!parentTableName.equals(ptable.getParentTableName().getString())) {
                 throw new SQLExceptionInfo.Builder(PARENT_TABLE_NOT_FOUND)
                         .setSchemaName(schemaName).setTableName(tableName).build().buildException();
@@ -3759,7 +3779,8 @@ public class MetaDataClient {
                 metaPropertiesEvaluated.getPhysicalTableName(),
                 metaPropertiesEvaluated.getSchemaVersion(),
                 metaPropertiesEvaluated.getColumnEncodedBytes(),
-                metaPropertiesEvaluated.getStreamingTopicName());
+                metaPropertiesEvaluated.getStreamingTopicName(),
+                metaPropertiesEvaluated.getMaxLookbackAge());
     }
 
     private  long incrementTableSeqNum(PTable table, PTableType expectedType, int columnCountDelta, Boolean isTransactional,
@@ -3767,7 +3788,7 @@ public class MetaDataClient {
                                        String schemaVersion, QualifierEncodingScheme columnEncodedBytes) throws SQLException {
         return incrementTableSeqNum(table, expectedType, columnCountDelta, isTransactional, null,
             updateCacheFrequency, null, null, null, null, -1L, null, null, null,phoenixTTL, false, physicalTableName,
-                schemaVersion, columnEncodedBytes, null);
+                schemaVersion, columnEncodedBytes, null, null);
     }
 
     private long incrementTableSeqNum(PTable table, PTableType expectedType, int columnCountDelta,
@@ -3776,7 +3797,7 @@ public class MetaDataClient {
             Boolean isMultiTenant, Boolean storeNulls, Long guidePostWidth, Boolean appendOnlySchema,
             ImmutableStorageScheme immutableStorageScheme, Boolean useStatsForParallelization,
             Long phoenixTTL, Boolean isChangeDetectionEnabled, String physicalTableName, String schemaVersion,
-                                      QualifierEncodingScheme columnEncodedBytes, String streamingTopicName)
+                                      QualifierEncodingScheme columnEncodedBytes, String streamingTopicName, Long maxLookbackAge)
             throws SQLException {
         String schemaName = table.getSchemaName().getString();
         String tableName = table.getTableName().getString();
@@ -3846,6 +3867,9 @@ public class MetaDataClient {
         }
         if (!Strings.isNullOrEmpty(streamingTopicName)) {
             mutateStringProperty(connection, tenantId, schemaName, tableName, STREAMING_TOPIC_NAME, streamingTopicName);
+        }
+        if (maxLookbackAge != null) {
+            mutateLongProperty(connection, tenantId, schemaName, tableName, MAX_LOOKBACK_AGE, maxLookbackAge);
         }
         return seqNum;
     }
@@ -4084,7 +4108,9 @@ public class MetaDataClient {
                 int numPkColumnsAdded = 0;
                 Set<String> colFamiliesForPColumnsToBeAdded = new LinkedHashSet<>();
                 Set<String> families = new LinkedHashSet<>();
-                PTable tableForCQCounters = tableType == PTableType.VIEW ? PhoenixRuntime.getTable(connection, table.getPhysicalName().getString()) : table;
+                PTable tableForCQCounters = tableType == PTableType.VIEW
+                        ? connection.getTable(table.getPhysicalName().getString())
+                        : table;
                 EncodedCQCounter cqCounterToUse = tableForCQCounters.getEncodedCQCounter();
                 Map<String, Integer> changedCqCounters = new HashMap<>(numCols);
                 if (numCols > 0 ) {
@@ -4618,7 +4644,7 @@ public class MetaDataClient {
         boolean hasIndexId = table.getViewIndexId() != null;
         if ( (table.getType()==PTableType.INDEX && hasIndexId)
                 || (table.getType() == PTableType.VIEW && table.getViewType() != ViewType.MAPPED)) {
-            parentTable = PhoenixRuntime.getTable(connection, table.getParentName().getString());
+            parentTable = connection.getTable(table.getParentName().getString());
             if (parentTable==null) {
                 String schemaName = table.getSchemaName()!=null ? table.getSchemaName().getString() : null;
                 throw new TableNotFoundException(schemaName, table.getTableName().getString());
@@ -4919,7 +4945,7 @@ public class MetaDataClient {
                     if (retried) {
                         throw e;
                     }
-                    table = connection.getTable(new PTableKey(tenantId, fullTableName));
+                    table = connection.getTable(fullTableName);
                     retried = true;
                 } catch (Throwable e) {
                     TableMetricsManager.updateMetricsForSystemCatalogTableMethod(tableName, NUM_METADATA_LOOKUP_FAILURES, 1);
@@ -5354,6 +5380,8 @@ public class MetaDataClient {
                         metaProperties.setSchemaVersion((String) value);
                     } else if (propName.equalsIgnoreCase(STREAMING_TOPIC_NAME)) {
                         metaProperties.setStreamingTopicName((String) value);
+                    } else if (propName.equalsIgnoreCase(MAX_LOOKBACK_AGE)) {
+                        metaProperties.setMaxLookbackAge((Long) value);
                     }
                 }
                 // if removeTableProps is true only add the property if it is not an HTable or Phoenix Table property
@@ -5562,6 +5590,21 @@ public class MetaDataClient {
             }
         }
 
+        if (metaProperties.getMaxLookbackAge() != null) {
+            if (table.getType() != TABLE) {
+                throw new SQLExceptionInfo.Builder(SQLExceptionCode.
+                        MAX_LOOKBACK_AGE_SUPPORTED_FOR_TABLES_ONLY)
+                        .setSchemaName(schemaName)
+                        .setTableName(tableName)
+                        .build()
+                        .buildException();
+            }
+            if (! Objects.equals(metaProperties.getMaxLookbackAge(), table.getMaxLookbackAge())) {
+                metaPropertiesEvaluated.setMaxLookbackAge(metaProperties.getMaxLookbackAge());
+                changingPhoenixTableProperty = true;
+            }
+        }
+
         return changingPhoenixTableProperty;
     }
 
@@ -5585,6 +5628,8 @@ public class MetaDataClient {
         private String physicalTableName = null;
         private String schemaVersion = null;
         private String streamingTopicName = null;
+
+        private Long maxLookbackAge = null;
 
         public Boolean getImmutableRowsProp() {
             return isImmutableRowsProp;
@@ -5733,6 +5778,14 @@ public class MetaDataClient {
         public void setStreamingTopicName(String streamingTopicName) {
             this.streamingTopicName = streamingTopicName;
         }
+
+        public Long getMaxLookbackAge() {
+            return maxLookbackAge;
+        }
+
+        public void setMaxLookbackAge(Long maxLookbackAge) {
+            this.maxLookbackAge = maxLookbackAge;
+        }
     }
 
     private static class MetaPropertiesEvaluated {
@@ -5753,6 +5806,8 @@ public class MetaDataClient {
         private String physicalTableName = null;
         private String schemaVersion = null;
         private String streamingTopicName = null;
+
+        private Long maxLookbackAge = null;
 
         public Boolean getIsImmutableRows() {
             return isImmutableRows;
@@ -5882,6 +5937,14 @@ public class MetaDataClient {
         public void setStreamingTopicName(String streamingTopicName) {
             this.streamingTopicName = streamingTopicName;
         }
+
+        public Long getMaxLookbackAge() {
+            return maxLookbackAge;
+        }
+
+        public void setMaxLookbackAge(Long maxLookbackAge) {
+            this.maxLookbackAge = maxLookbackAge;
+        }
     }
 
 
@@ -5907,8 +5970,8 @@ public class MetaDataClient {
 
                 changePermsOnSchema(clusterConnection, changePermsStatement);
             } else if (changePermsStatement.getTableName() != null) {
-                PTable inputTable = PhoenixRuntime.getTable(connection,
-                        SchemaUtil.normalizeFullTableName(changePermsStatement.getTableName().toString()));
+                PTable inputTable = connection.getTable(SchemaUtil.
+                        normalizeFullTableName(changePermsStatement.getTableName().toString()));
                 if (!(PTableType.TABLE.equals(inputTable.getType()) || PTableType.SYSTEM.equals(inputTable.getType()))) {
                     throw new AccessDeniedException("Cannot GRANT or REVOKE permissions on INDEX TABLES or VIEWS");
                 }

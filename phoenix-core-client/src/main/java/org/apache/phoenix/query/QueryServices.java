@@ -347,6 +347,8 @@ public interface QueryServices extends SQLCloseable {
     public static final String GLOBAL_INDEX_ROW_AGE_THRESHOLD_TO_DELETE_MS_ATTRIB = "phoenix.global.index.row.age.threshold.to.delete.ms";
     // Enable the IndexRegionObserver Coprocessor
     public static final String INDEX_REGION_OBSERVER_ENABLED_ATTRIB = "phoenix.index.region.observer.enabled";
+    // Whether IndexRegionObserver/GlobalIndexChecker is enabled for all tables
+    public static final String INDEX_REGION_OBSERVER_ENABLED_ALL_TABLES_ATTRIB = "phoenix.index.region.observer.enabled.all.tables";
     // Enable Phoenix server paging
     public static final String PHOENIX_SERVER_PAGING_ENABLED_ATTRIB = "phoenix.server.paging.enabled";
     // Enable support for long view index(default is false)
@@ -447,6 +449,35 @@ public interface QueryServices extends SQLCloseable {
     String DISABLE_VIEW_SUBTREE_VALIDATION = "phoenix.disable.view.subtree.validation";
 
     boolean DEFAULT_DISABLE_VIEW_SUBTREE_VALIDATION = false;
+
+    /**
+     * Only used by tests: parameter to determine num of regionservers to be created by
+     * MiniHBaseCluster.
+     */
+    String TESTS_MINI_CLUSTER_NUM_REGION_SERVERS = "phoenix.tests.minicluster.numregionservers";
+
+
+    /**
+     * Config to inject any processing after the client retrieves dummy result from the server.
+     */
+    String PHOENIX_POST_DUMMY_PROCESS = "phoenix.scanning.result.post.dummy.process";
+
+    /**
+     * Config to inject any processing after the client retrieves valid result from the server.
+     */
+    String PHOENIX_POST_VALID_PROCESS = "phoenix.scanning.result.post.valid.process";
+
+    /**
+     * New start rowkey to be used by paging region scanner for the scan.
+     */
+    String PHOENIX_PAGING_NEW_SCAN_START_ROWKEY = "phoenix.paging.start.newscan.startrow";
+
+    /**
+     * New start rowkey to be included by paging region scanner for the scan. The value of the
+     * attribute is expected to be boolean.
+     */
+    String PHOENIX_PAGING_NEW_SCAN_START_ROWKEY_INCLUDE =
+            "phoenix.paging.start.newscan.startrow.include";
 
     /**
      * Get executor service used for parallel scans
